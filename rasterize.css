@@ -1,0 +1,107 @@
+#mainContainer {
+    display: flex;
+    align-items: flex-start;
+    gap: 20px; /* space between canvas and controls */
+    padding: 10px;
+}
+  
+/* Shadow Controls */
+.shadow-technique-group {
+display: flex;
+gap: 5px;
+margin-bottom: 15px;
+}
+
+.shadow-technique-btn {
+flex: 1;
+padding: 8px 10px;
+background: #444;
+color: white;
+border: none;
+border-radius: 3px;
+cursor: pointer;
+font-size: 14px;
+transition: background 0.2s;
+}
+
+.shadow-technique-btn:hover {
+background: #555;
+}
+
+.shadow-technique-btn.active {
+background: #0078d7;
+font-weight: bold;
+}
+
+.control-group {
+margin-top: 10px;
+padding-top: 10px;
+border-top: 1px solid #444;
+display: none; /* Hidden by default */
+}
+
+label {
+display: block;
+margin: 8px 0 3px 0;
+color: white;
+font-size: 13px;
+}
+
+input[type="range"] {
+width: 100%;
+margin-bottom: 15px;
+}
+
+.slider-value {
+float: right;
+font-weight: bold;
+}
+
+input[type="range"]:disabled {
+opacity: 0.5;
+cursor: not-allowed;
+}
+
+/* HUD styling */
+#hud {
+position: absolute;
+top: 10px;
+left: 10px;
+color: black;
+font-family: Arial, sans-serif;
+font-size: 16px;
+pointer-events: none;
+z-index: 10;
+font-weight: bold;
+}
+
+/* Shadow controls panel */
+#shadowControls {
+position: static;
+top: 10px;
+right: 10px;
+width: 300px;
+background: rgba(0, 0, 0, 0.7);
+padding: 15px;
+border-radius: 5px;
+z-index: 10;
+color: white;
+font-family: Arial, sans-serif;
+}
+
+#shadowControls h3 {
+margin-top: 0;
+margin-bottom: 15px;
+font-size: 16px;
+border-bottom: 1px solid #444;
+padding-bottom: 8px;
+}
+
+body {
+    margin: 0;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    height: 100vh;
+    /* background-color: #222; */
+}
