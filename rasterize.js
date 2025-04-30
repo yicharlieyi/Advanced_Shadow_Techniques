@@ -79,6 +79,20 @@ var usePCFULoc; // PCf setting uniform
 var pcfKernelSizeULoc; // kernel size uniform
 var pcfBiasScaleULoc; // bias scale uniform
 
+var useVSM = false; // Default to VSM disabled
+var vsmMinVariance = 0.005;
+var varianceShadowMapFramebuffers = [];
+var varianceShadowMapTextures = [];
+
+var useVSMULoc; // VSM setting uniform
+var vsmMinVarianceULoc; // min variance uniform
+var varianceShadowMapULoc = []; // VSM shadow map uniform
+var vsmShaderProgram; // Shader program for VSM
+var vsmVPosAttribLoc; // VSM shader position attribute location
+var vsmPMatrixULoc; // VSM shader projection matrix uniform
+var vsmVMatrixULoc; // VSM shader view matrix uniform
+var vsmMMatrixULoc; // VSM shader model matrix uniform
+
 // Define the scene set up
 const scene = 
 [
@@ -485,6 +499,22 @@ function handleKeyDown(event) {
                 Center = vec3.add(Center,Center,vec3.scale(temp,lookAt,viewDelta));
             } // end if shift not pressed
             break;
+        case "KeyQ": // translate view up, rotate counterclockwise with shift
+            if (event.getModifierState("Shift"))
+                Up = vec3.normalize(Up,vec3.add(Up,Up,vec3.scale(temp,viewRight,-viewDelta)));
+            else {
+                Eye = vec3.add(Eye,Eye,vec3.scale(temp,Up,viewDelta));
+                Center = vec3.add(Center,Center,vec3.scale(temp,Up,viewDelta));
+            } // end if shift not pressed
+            break;
+        case "KeyE": // translate view down, rotate clockwise with shift
+            if (event.getModifierState("Shift"))
+                Up = vec3.normalize(Up,vec3.add(Up,Up,vec3.scale(temp,viewRight,viewDelta)));
+            else {
+                Eye = vec3.add(Eye,Eye,vec3.scale(temp,Up,-viewDelta));
+                Center = vec3.add(Center,Center,vec3.scale(temp,Up,-viewDelta));
+            } // end if shift not pressed
+            break;
     } // end switch
 } // end handleKeyDown
 
@@ -497,6 +527,12 @@ function setupWebGL() {
     // create a webgl canvas and set it up
     var webGLCanvas = document.getElementById("myWebGLCanvas"); // create a webgl canvas
     gl = webGLCanvas.getContext("webgl2"); // get a webgl object from it
+
+    if (!setupWebGLExtensions()) {
+        // Fallback to basic shadows if VSM isn't supported
+        useVSM = false;
+    }
+    
     try {
       if (gl == null) {
         throw "unable to create gl context -- is your browser gl ready?";
@@ -513,6 +549,23 @@ function setupWebGL() {
  
 } // end setupWebGL
 
+function setupWebGLExtensions() {
+    // Required for floating point textures
+    const floatExtension = gl.getExtension('EXT_color_buffer_float');
+    if (!floatExtension) {
+        console.error('EXT_color_buffer_float not supported - VSM will not work');
+        return false;
+    }
+
+    // Recommended for texture filtering
+    const floatLinearExtension = gl.getExtension('OES_texture_float_linear');
+    if (!floatLinearExtension) {
+        console.warn('OES_texture_float_linear not supported - VSM filtering may be limited');
+    }
+
+    return true;
+}
+
 function setupShadowControls() {
     // CSM controls
     const basicShadowBtn = document.getElementById('basicShadowBtn');
@@ -524,12 +577,10 @@ function setupShadowControls() {
     const csmControls = document.getElementById('csmControls');
     const shadowMapSizeSlider = document.getElementById('shadowMapSizeSlider');
     const shadowMapSizeValue = document.getElementById('shadowMapSizeValue');
-    const pcfControls = document.getElementById('pcfControls'); // Changed from pcfSettings
 
     // Set initial UI state
     basicShadowBtn.classList.add('active');
     csmControls.style.display = 'none';
-    pcfControls.style.display = 'none'; // Hide PCF controls initially
     cascadeCountSlider.value = 3;
     cascadeCountValue.textContent = '3';
     cascadeSplitSlider.value = '0.5';
@@ -602,18 +653,14 @@ function setupShadowControls() {
 
     // PCF Controls
     const pcfToggleBtn = document.getElementById('pcfToggleBtn');
+    const pcfControls = document.getElementById('pcfControls');
     const pcfKernelSizeSlider = document.getElementById('pcfKernelSizeSlider');
     const pcfBiasSlider = document.getElementById('pcfBiasSlider');
     const pcfKernelSizeValue = document.getElementById('pcfKernelSizeValue');
     const pcfBiasValue = document.getElementById('pcfBiasValue');
 
     // Initialize PCF button state
-    pcfToggleBtn.classList.toggle('active', usePCF);
     pcfControls.style.display = usePCF ? 'block' : 'none';
-    
-    // Enable/disable sliders based on initial PCF state
-    pcfKernelSizeSlider.disabled = !usePCF;
-    pcfBiasSlider.disabled = !usePCF;
 
     pcfKernelSizeSlider.min = 1;
     pcfKernelSizeSlider.max = 7;
@@ -624,15 +671,15 @@ function setupShadowControls() {
     // Toggle PCF
     pcfToggleBtn.addEventListener('click', function() {
         usePCF = !usePCF;
-        this.classList.toggle('active');
+        useVSM = false;
+        pcfToggleBtn.classList.toggle('active');
+        vsmToggleBtn.classList.remove('active');
         
         // Show/hide settings based on PCF state
         pcfControls.style.display = usePCF ? 'block' : 'none';
+        vsmControls.style.display = 'none';
         
-        // Enable/disable sliders based on PCF state
-        pcfKernelSizeSlider.disabled = !usePCF;
-        pcfBiasSlider.disabled = !usePCF;
-        
+        calculateLightMatrices(); // Recalculate for PCF
         renderModels();
     });
     
@@ -644,7 +691,6 @@ function setupShadowControls() {
     });
 
     pcfKernelSizeSlider.addEventListener('change', function() {
-        // Optional: You could add additional handling when user stops dragging
         renderModels();
     });
     
@@ -654,6 +700,39 @@ function setupShadowControls() {
         pcfBiasValue.textContent = pcfBiasScale.toFixed(3);
         renderModels();
     });
+
+    // VSM Controls
+    const vsmToggleBtn = document.getElementById('vsmToggleBtn');
+    const vsmControls = document.getElementById('vsmControls');
+    const vsmMinVarianceSlider = document.getElementById('vsmMinVarianceSlider');
+    const vsmMinVarianceValue = document.getElementById('vsmMinVarianceValue');
+
+    // Hide VSM controls depends on the mode
+    vsmControls.style.display = useVSM ? 'block' : 'none';
+
+    vsmToggleBtn.addEventListener('click', function() {
+        useVSM = !useVSM;
+        usePCF = false;
+        vsmToggleBtn.classList.toggle('active');
+        pcfToggleBtn.classList.remove('active');
+        vsmControls.style.display = useVSM ? 'block' : 'none';
+        pcfControls.style.display = 'none';
+        calculateLightMatrices(); // Recalculate for VSM
+        setupShadowMaps();
+        renderModels();
+    });
+
+    vsmMinVarianceSlider.addEventListener('input', function() {
+        vsmMinVariance = parseFloat(this.value);
+        vsmMinVarianceValue.textContent = vsmMinVariance.toFixed(4);
+        
+        if (shaderProgram) {
+            gl.useProgram(shaderProgram);
+            gl.uniform1f(gl.getUniformLocation(shaderProgram, "uVSMMinVariance"), vsmMinVariance);
+        }
+        renderModels();
+    });
+    
 }
 
 function updateCascadeDistances(splitRatio = 0.5) {
@@ -717,14 +796,73 @@ function updateLightPosition() {
 }
 
 function setupShadowMaps() {
+    if (useVSM) {
+        setupVarianceShadowMaps();
+    }
+    else {
+        setupStandardShadowMaps();
+    }
+}
+
+function setupVarianceShadowMaps() {
+    // Clear existing
+    varianceShadowMapFramebuffers = [];
+    varianceShadowMapTextures.forEach(tex => gl.deleteTexture(tex));
+    varianceShadowMapTextures = [];
+    lightViewMatrices = [];
+    lightProjMatrices = [];
+
+    // Determine how many cascades to create based on current technique
+    var numCascades = shadowTechnique === "csm" ? currentCascades : 1;
+
+    for (let i = 0; i < numCascades; i++) {
+        // Create RG32F texture for storing depth and depth squared
+        const texture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG32F, 
+                    SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0, 
+                    gl.RG, gl.FLOAT, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        
+        // Create FBO
+        const fbo = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, 
+                            gl.TEXTURE_2D, texture, 0);
+        
+        // Check framebuffer status
+        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+            console.error("Framebuffer incomplete");
+        }
+        // We don't need a depth buffer for VSM
+        gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+        
+        varianceShadowMapFramebuffers.push(fbo);
+        varianceShadowMapTextures.push(texture);
+        lightViewMatrices.push(mat4.create());
+        lightProjMatrices.push(mat4.create());
+    }
+    // Update the shader with the new size
+    if (shaderProgram) {
+        gl.useProgram(shaderProgram);
+        gl.uniform2f(shadowMapSizeULoc, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+    }
+    // Create VSM shader
+    setupVSMShader();
+}
+
+function setupStandardShadowMaps() {
     // Clear any existing shadow maps
     shadowMapFramebuffers = [];
     shadowMapTextures = [];
     lightViewMatrices = [];
     lightProjMatrices = [];
 
-     // Determine how many cascades to create based on current technique
-     var numCascades = shadowTechnique === "csm" ? currentCascades : 1;
+    // Determine how many cascades to create based on current technique
+    var numCascades = shadowTechnique === "csm" ? currentCascades : 1;
 
     // Create framebuffers and textures for each cascade
     for (let i = 0; i < numCascades; i++) {
@@ -732,8 +870,8 @@ function setupShadowMaps() {
         const texture = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, texture);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT16, 
-                     SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0, 
-                     gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+                    SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0, 
+                    gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -744,7 +882,7 @@ function setupShadowMaps() {
         const fbo = gl.createFramebuffer();
         gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
         gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, 
-                              gl.TEXTURE_2D, texture, 0);
+                            gl.TEXTURE_2D, texture, 0);
         
         // Check framebuffer status
         if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
@@ -794,16 +932,86 @@ function setupShadowShader() {
     gl.shaderSource(fShader, fShaderCode);
     gl.compileShader(fShader);
     
+    if (!gl.getShaderParameter(vShader, gl.COMPILE_STATUS)) {
+        console.error('Vertex shader error:', gl.getShaderInfoLog(vShader));
+    }
+    if (!gl.getShaderParameter(fShader, gl.COMPILE_STATUS)) {
+        console.error('Fragment shader error:', gl.getShaderInfoLog(fShader));
+    }
+
     shadowShaderProgram = gl.createProgram();
     gl.attachShader(shadowShaderProgram, vShader);
     gl.attachShader(shadowShaderProgram, fShader);
     gl.linkProgram(shadowShaderProgram);
+
+    if (!gl.getProgramParameter(shadowShaderProgram, gl.LINK_STATUS)) {
+        console.error('Program link error:', gl.getProgramInfoLog(shadowShaderProgram));
+    }
     
     // Get attribute and uniform locations
     shadowVPosAttribLoc = gl.getAttribLocation(shadowShaderProgram, "aVertexPosition");
     shadowMMatrixULoc = gl.getUniformLocation(shadowShaderProgram, "uMMatrix");
     shadowVMatrixULoc = gl.getUniformLocation(shadowShaderProgram, "uVMatrix");
     shadowPMatrixULoc = gl.getUniformLocation(shadowShaderProgram, "uPMatrix");
+}
+
+function setupVSMShader() {
+    const vsmVShader = `#version 300 es
+        in vec3 aVertexPosition;
+        uniform mat4 uMMatrix;
+        uniform mat4 uVMatrix;
+        uniform mat4 uPMatrix;
+        
+        void main() {
+            gl_Position = uPMatrix * uVMatrix * uMMatrix * vec4(aVertexPosition, 1.0);
+        }
+    `;
+    
+const vsmFShader = `#version 300 es
+        precision highp float;
+        out vec4 fragColor;
+        
+        void main() {
+            float depth = gl_FragCoord.z;
+            fragColor = vec4(depth, depth*depth, 0.0, 1.0);
+        }
+    `;
+    
+    // Compile and link shaders
+    var vShader = gl.createShader(gl.VERTEX_SHADER);
+    gl.shaderSource(vShader, vsmVShader);
+    gl.compileShader(vShader);
+
+    var fShader = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fShader, vsmFShader);
+    gl.compileShader(fShader);
+    
+    if (!gl.getShaderParameter(vShader, gl.COMPILE_STATUS)) {
+        console.error('Vertex shader error:', gl.getShaderInfoLog(vShader));
+    }
+    if (!gl.getShaderParameter(fShader, gl.COMPILE_STATUS)) {
+        console.error('Fragment shader error:', gl.getShaderInfoLog(fShader));
+    }
+
+    vsmShaderProgram = gl.createProgram();
+    gl.attachShader(vsmShaderProgram, vShader);
+    gl.attachShader(vsmShaderProgram, fShader);
+    gl.linkProgram(vsmShaderProgram);
+    
+    if (!gl.getProgramParameter(vsmShaderProgram, gl.LINK_STATUS)) {
+        console.error('Program link error:', gl.getProgramInfoLog(vsmShaderProgram));
+    }
+
+    // Get attribute and uniform locations
+    vsmVPosAttribLoc = gl.getAttribLocation(vsmShaderProgram, "aVertexPosition");
+    vsmMMatrixULoc = gl.getUniformLocation(vsmShaderProgram, "uMMatrix");
+    vsmVMatrixULoc = gl.getUniformLocation(vsmShaderProgram, "uVMatrix");
+    vsmPMatrixULoc = gl.getUniformLocation(vsmShaderProgram, "uPMatrix");
+
+    // Verify uniform locations
+    if (!vsmVMatrixULoc || !vsmPMatrixULoc || !vsmMMatrixULoc) {
+        console.error("Missing VSM shader uniform locations");
+    }
 }
 
 function calculateLightMatrices() {
@@ -898,6 +1106,87 @@ function getFrustumCorners(near, far, viewMatrix) {
 }
 
 function renderShadowMaps() {
+    if (useVSM) {
+        renderVarianceShadowMaps();
+    } else {
+        renderStandardShadowMaps();
+    }
+}
+
+function renderVarianceShadowMaps() {
+    // First completely unbind all shadow map textures from all texture units
+    for (let i = 0; i < MAX_CASCADES; i++) {
+        gl.activeTexture(gl.TEXTURE5 + i);
+        gl.bindTexture(gl.TEXTURE_2D, null);
+    }
+
+    calculateLightMatrices();
+
+    // Special VSM shader program
+    gl.useProgram(vsmShaderProgram);
+    
+    // Render each cascade
+    for (let i = 0; i < currentCascades; i++) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, varianceShadowMapFramebuffers[i]);
+        gl.viewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+        gl.clearColor(1.0, 1.0, 0.0, 1.0); // Clear to max depth
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        gl.useProgram(vsmShaderProgram);
+
+        // Only enable the attribute actually used by the shadow shader
+        gl.enableVertexAttribArray(vsmVPosAttribLoc);
+        gl.uniformMatrix4fv(vsmVMatrixULoc, false, lightViewMatrices[i]);
+        gl.uniformMatrix4fv(vsmPMatrixULoc, false, lightProjMatrices[i]);
+        
+        // Render all triangles
+        for (let whichTriSet = 0; whichTriSet < numTriangleSets; whichTriSet++) {
+            const currSet = inputTriangles[whichTriSet];
+            let mMatrix = mat4.create();
+            makeModelTransform(currSet, mMatrix);
+            gl.uniformMatrix4fv(vsmMMatrixULoc, false, mMatrix);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffers[whichTriSet]);
+            gl.vertexAttribPointer(vsmVPosAttribLoc, 3, gl.FLOAT, false, 0, 0);
+            gl.enableVertexAttribArray(vsmVPosAttribLoc);
+            
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, triangleBuffers[whichTriSet]);
+            gl.drawElements(gl.TRIANGLES, 3 * triSetSizes[whichTriSet], gl.UNSIGNED_SHORT, 0);
+        }
+        
+        // Render all spheres
+        const sphere = makeSphere(32); // Reuse your sphere generation function
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffers[vertexBuffers.length-1]);
+        gl.vertexAttribPointer(vsmVPosAttribLoc, 3, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(vsmVPosAttribLoc);
+        
+        for (let whichSphere = 0; whichSphere < numSpheres; whichSphere++) {
+            const sphereData = inputSpheres[whichSphere];
+            const mMatrix = mat4.create();
+            mat4.fromTranslation(mMatrix, vec3.fromValues(sphereData.x, sphereData.y, sphereData.z));
+            mat4.scale(mMatrix, mMatrix, vec3.fromValues(sphereData.r, sphereData.r, sphereData.r));
+            
+            gl.uniformMatrix4fv(vsmMMatrixULoc, false, mMatrix);
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, triangleBuffers[triangleBuffers.length-1]);
+            gl.drawElements(gl.TRIANGLES, sphere.triangles.length, gl.UNSIGNED_SHORT, 0);
+        }
+    }
+    // Switch back to main shader program before binding textures
+    gl.useProgram(shaderProgram);
+
+    // Bind VSM textures for main rendering
+    for (let i = 0; i < currentCascades; i++) {
+        gl.activeTexture(gl.TEXTURE5 + i);
+        gl.bindTexture(gl.TEXTURE_2D, varianceShadowMapTextures[i]);
+        gl.uniform1i(varianceShadowMapULoc[i], 5 + i);
+    }
+    
+    // Restore default framebuffer and viewport
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+}
+
+function renderStandardShadowMaps() {
     // First completely unbind all shadow map textures from all texture units
     for (let i = 0; i < MAX_CASCADES; i++) {
         gl.activeTexture(gl.TEXTURE1 + i);
@@ -905,6 +1194,7 @@ function renderShadowMaps() {
     }
 
     calculateLightMatrices();
+    gl.useProgram(shadowShaderProgram);
     
     // Render each cascade
     for (let i = 0; i < currentCascades; i++) {
@@ -1270,7 +1560,7 @@ function setupShaders() {
         }
     `;
     
-    // define fragment shader in essl using es6 template strings
+    // define fragment shader
     var fShaderCode = `#version 300 es
         // Set a maximum number of cascades
         #define MAX_CASCADES 4 
@@ -1317,7 +1607,12 @@ function setupShaders() {
         uniform int uPCFKernelSize; // uniform for PCF kernel size
         uniform float uPCFBiasScale; // uniform for PCF bias scale
 
-        // PCF shadow calculation using sampler2DShadow
+        // VSM properties
+        uniform bool uUseVSM; // uniform for VSM setting
+        uniform float uVSMMinVariance; // minimum variance to prevent light bleeding
+        uniform sampler2D uVarianceShadowMaps[MAX_CASCADES]; // VSM uses regular sampler2D
+
+        // Shadow calculation
         float calculateShadow(vec3 worldPos, vec3 lightDir) {
             if (uCascadeCount == 0) return 0.0; // No shadows if disabled
 
@@ -1378,6 +1673,31 @@ function setupShaders() {
                     }
                 }
                 shadow /= float(samples);
+            } else if (uUseVSM) {
+                vec2 moments;
+                // Sample moments
+                if (cascade == 0) {
+                    moments = texture(uVarianceShadowMaps[0], lightSpacePos.xy).rg;
+                } else if (cascade == 1) {
+                    moments = texture(uVarianceShadowMaps[1], lightSpacePos.xy).rg;
+                } else if (cascade == 2) {
+                    moments = texture(uVarianceShadowMaps[2], lightSpacePos.xy).rg;
+                } else {
+                    moments = texture(uVarianceShadowMaps[3], lightSpacePos.xy).rg;
+                }
+                    
+                // Surface depth in light space
+                float depth = lightSpacePos.z;
+
+                // Variance shadow mapping calculation using Chebyshev's inequality
+                float p = depth <= moments.x ? 1.0 : 0.0;
+                float variance = moments.y - (moments.x * moments.x);
+                variance = max(variance, uVSMMinVariance);
+                
+                float d = depth - moments.x;
+                float p_max = variance / (variance + d*d);
+
+                shadow = 1.0 - clamp(max(p, p_max), 0.0, 1.0);
             } else {
                 // Simple shadow lookup without PCF
                 vec3 sampleCoord = vec3(lightSpacePos.xy, lightSpacePos.z - bias);
@@ -1485,6 +1805,11 @@ function setupShaders() {
                 usePCFULoc = gl.getUniformLocation(shaderProgram, "uUsePCF"); // use PCF 
                 pcfKernelSizeULoc = gl.getUniformLocation(shaderProgram, "uPCFKernelSize");
                 pcfBiasScaleULoc = gl.getUniformLocation(shaderProgram, "uPCFBiasScale");
+
+                // VSM uniforms
+                useVSMULoc = gl.getUniformLocation(shaderProgram, "uUseVSM"); // use VSM 
+                vsmMinVarianceULoc = gl.getUniformLocation(shaderProgram, "uVSMMinVariance");
+
                 // locate shadow map uniforms
                 var cascadeDistancesULoc = gl.getUniformLocation(shaderProgram, "uCascadeDistances");
                 
@@ -1500,6 +1825,14 @@ function setupShaders() {
                     shadowMapULoc.push(gl.getUniformLocation(shaderProgram, `uShadowMaps[${i}]`));
                     lightViewMatricesULoc.push(gl.getUniformLocation(shaderProgram, `uLightViewMatrices[${i}]`));
                     lightProjMatricesULoc.push(gl.getUniformLocation(shaderProgram, `uLightProjMatrices[${i}]`));
+                }
+                
+                // Initialize VSM texture
+                for (let i = 0; i < MAX_CASCADES; i++) {
+                    gl.activeTexture(gl.TEXTURE5 + i);
+                    const loc = gl.getUniformLocation(shaderProgram, `uVarianceShadowMaps[${i}]`);
+                    varianceShadowMapULoc.push(loc);
+                    gl.uniform1i(loc, 5 + i); // Use higher texture units
                 }
 
                 gl.uniform1fv(cascadeDistancesULoc, new Float32Array(CASCADE_DISTANCES));
@@ -1519,6 +1852,10 @@ function setupShaders() {
                 gl.uniform1i(usePCFULoc, usePCF);
                 gl.uniform1i(pcfKernelSizeULoc, pcfKernelSize);
                 gl.uniform1f(pcfBiasScaleULoc, pcfBiasScale);
+
+                // Pass the VSM to the shader
+                gl.uniform1i(useVSMULoc, useVSM);
+                gl.uniform1f(vsmMinVarianceULoc, vsmMinVariance);
             } // end if no shader program link errors
         } // end if no compile errors
     } // end try 
@@ -1573,6 +1910,10 @@ function renderModels() {
     gl.uniform1i(pcfKernelSizeULoc, pcfKernelSize);
     gl.uniform1f(pcfBiasScaleULoc, pcfBiasScale);
 
+    // Pass the VSM setting to the shader
+    gl.uniform1i(useVSMULoc, useVSM);
+    gl.uniform1f(vsmMinVarianceULoc, vsmMinVariance);
+
     var numActiveCascades = shadowTechnique === "csm" ? currentCascades : 1;
 
     for (let i = 0; i < MAX_CASCADES; i++) {
@@ -1588,6 +1929,14 @@ function renderModels() {
         if (i < numActiveCascades) {
             gl.uniformMatrix4fv(lightViewMatricesULoc[i], false, lightViewMatrices[i]);
             gl.uniformMatrix4fv(lightProjMatricesULoc[i], false, lightProjMatrices[i]);
+        }
+    }
+    // When rendering with VSM
+    if (useVSM) {
+        for (let i = 0; i < currentCascades; i++) { 
+            gl.activeTexture(gl.TEXTURE5 + i);
+            gl.bindTexture(gl.TEXTURE_2D, varianceShadowMapTextures[i]);
+            gl.uniform1i(varianceShadowMapULoc[i], 5 + i);
         }
     }
     // set up handedness, projection and view
@@ -1701,7 +2050,7 @@ function measureFrameTime() {
 
     // 2. Render the scene using the updated shadow maps
     renderModels();
-
+    
     var endTime = performance.now();
     var frameTime = endTime - startTime;
 

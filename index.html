@@ -29,6 +29,7 @@
           <button id="basicShadowBtn" class="shadow-technique-btn active">Basic Shadow Map</button>
           <button id="csmBtn" class="shadow-technique-btn">Cascaded Shadow Maps</button>
           <button id="pcfToggleBtn" class="shadow-technique-btn">Percentage Closer Filtering</button>
+          <button id="vsmToggleBtn" class="shadow-technique-btn">Variance Shadow Maps</button>
         </div>
         
         <!-- CSM Controls (shown when CSM is enabled) -->
@@ -62,6 +63,14 @@
           </label>
           <input type="range" id="pcfBiasSlider" min="0.001" max="0.1" step="0.001" value="0.03">
         </div>
+
+        <!-- VSM Controls (shown when VSM is enabled) -->
+        <div id="vsmControls" class="control-group">
+          <label for="vsmMinVarianceSlider">
+              Min Variance: <span id="vsmMinVarianceValue">0.005</span>
+          </label>
+          <input type="range" id="vsmMinVarianceSlider" min="0.0001" max="0.01" step="0.0001" value="0.001">
+      </div>
         
         <!-- Light controls section -->
         <div id="lightControls" class="control-group" style="display: block;">
